@@ -70,6 +70,54 @@ section h3 {
   color: #0066cc;
 }
 
+.activity-image {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-bottom: 10px;
+  background-color: #eee;
+}
+
+.image-upload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.image-upload-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 160px;
+  font-size: 14px;
+  font-weight: bold;
+  color: #1a237e;
+}
+
+.image-upload input[type="file"] {
+  font-size: 14px;
+  font-weight: normal;
+}
+
+.image-upload button,
+.remove-image-btn {
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.remove-image-btn {
+  background-color: #c62828;
+}
+
+.remove-image-btn:hover {
+  background-color: #b71c1c;
+}
+
 .activity-card p {
   margin-bottom: 8px;
 }
