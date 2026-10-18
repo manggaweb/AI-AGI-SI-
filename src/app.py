@@ -95,9 +95,22 @@ def root():
 def activity_slug(activity_name: str) -> str:
     """Build a filesystem-safe name that cannot escape the uploads directory."""
     slug = re.sub(r"[^a-z0-9]+", "-", activity_name.lower()).strip("-")
-    if not slug or slug in {".", ".."}:
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug or ""):
         raise HTTPException(status_code=400, detail="Invalid activity name")
     return slug
+
+
+def resolved_upload_path(activity_name: str, extension: str) -> str:
+    """Return a normalized path that is confirmed to stay inside the uploads directory."""
+    if extension not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid image type")
+
+    filename = f"{activity_slug(activity_name)}{extension}"
+    root = os.path.realpath(UPLOAD_DIR)
+    candidate = os.path.realpath(os.path.join(root, filename))
+    if not candidate.startswith(root + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid image path")
+    return candidate
 
 
 def detect_image_extension(data: bytes) -> str | None:
@@ -113,32 +126,19 @@ def detect_image_extension(data: bytes) -> str | None:
     return None
 
 
-def image_path_for(activity_name: str, extension: str | None = None) -> Path | None:
-    slug = activity_slug(activity_name)
-    if extension:
-        return UPLOAD_DIR / f"{slug}{extension}"
-    for ext in IMAGE_EXTENSIONS:
-        candidate = UPLOAD_DIR / f"{slug}{ext}"
-        if candidate.is_file():
-            return candidate
+def image_url_for(activity_name: str) -> str | None:
+    for extension in IMAGE_EXTENSIONS:
+        path = resolved_upload_path(activity_name, extension)
+        if os.path.isfile(path):
+            return f"/uploads/{activity_slug(activity_name)}{extension}"
     return None
 
 
-def image_url_for(activity_name: str) -> str | None:
-    path = image_path_for(activity_name)
-    if path is None:
-        return None
-    return f"/uploads/{path.name}"
-
-
 def delete_activity_images(activity_name: str) -> None:
-    slug = activity_slug(activity_name)
-    for ext in IMAGE_EXTENSIONS:
-        candidate = (UPLOAD_DIR / f"{slug}{ext}").resolve()
-        if UPLOAD_DIR.resolve() not in candidate.parents:
-            continue
-        if candidate.is_file():
-            candidate.unlink()
+    for extension in IMAGE_EXTENSIONS:
+        path = resolved_upload_path(activity_name, extension)
+        if os.path.isfile(path):
+            os.remove(path)
 
 
 @app.get("/activities")
@@ -217,12 +217,9 @@ async def upload_activity_image(activity_name: str, file: UploadFile = File(...)
         )
 
     delete_activity_images(activity_name)
-    destination = image_path_for(activity_name, extension)
-    resolved = destination.resolve()
-    if UPLOAD_DIR.resolve() not in resolved.parents:
-        raise HTTPException(status_code=400, detail="Invalid image path")
-
-    destination.write_bytes(data)
+    destination = resolved_upload_path(activity_name, extension)
+    with open(destination, "wb") as image_file:
+        image_file.write(data)
     return {
         "message": f"Uploaded image for {activity_name}",
         "image": image_url_for(activity_name),
