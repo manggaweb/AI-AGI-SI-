@@ -1,0 +1,79 @@
+name: Upgrade vulnerable dependencies
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  approve-security-upgrades:
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve and auto-merge vulnerable library upgrades
+        if: steps.metadata.outputs.alert-state == 'open'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL" --body "Automatic approval: this upgrade fixes a vulnerable library."
+          gh pr merge --auto --squash "$PR_URL"
+
+  fix-vulnerable-python:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Upgrade requirements with known vulnerabilities
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit -r requirements.txt --fix
+
+      - name: Open and auto-merge an upgrade pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet -- requirements.txt; then
+            echo "No vulnerable libraries to upgrade."
+            exit 0
+          fi
+
+          branch="deps/pip-audit-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add requirements.txt
+          git commit -m "Upgrade Python libraries with known vulnerabilities"
+          git push origin "$branch"
+
+          pr_url="$(gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Upgrade vulnerable Python libraries" \
+            --body "Automatically upgrades Python libraries in requirements.txt that pip-audit found with known vulnerabilities. Libraries without a known vulnerability are left unchanged.")"
+          gh pr merge --auto --squash "$pr_url"
