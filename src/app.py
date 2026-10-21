@@ -5,11 +5,15 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+import hmac
+import json
 import os
 import re
+import secrets
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -27,64 +31,61 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 IMAGE_EXTENSIONS = (".jpg", ".png", ".gif", ".webp")
+ACTIVITIES_PATH = current_dir / "activities.json"
+TEACHERS_PATH = current_dir / "teachers.json"
+REQUIRED_ACTIVITY_FIELDS = (
+    "description",
+    "schedule",
+    "max_participants",
+    "participants",
+    "category",
+    "start_minutes",
+)
 
-# In-memory activity database
-activities = {
-    "Chess Club": {
-        "description": "Learn strategies and compete in chess tournaments",
-        "schedule": "Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 12,
-        "participants": ["michael@mergington.edu", "daniel@mergington.edu"]
-    },
-    "Programming Class": {
-        "description": "Learn programming fundamentals and build software projects",
-        "schedule": "Tuesdays and Thursdays, 3:30 PM - 4:30 PM",
-        "max_participants": 20,
-        "participants": ["emma@mergington.edu", "sophia@mergington.edu"]
-    },
-    "Gym Class": {
-        "description": "Physical education and sports activities",
-        "schedule": "Mondays, Wednesdays, Fridays, 2:00 PM - 3:00 PM",
-        "max_participants": 30,
-        "participants": ["john@mergington.edu", "olivia@mergington.edu"]
-    },
-    "Soccer Team": {
-        "description": "Join the school soccer team and compete in matches",
-        "schedule": "Tuesdays and Thursdays, 4:00 PM - 5:30 PM",
-        "max_participants": 22,
-        "participants": ["liam@mergington.edu", "noah@mergington.edu"]
-    },
-    "Basketball Team": {
-        "description": "Practice and play basketball with the school team",
-        "schedule": "Wednesdays and Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 15,
-        "participants": ["ava@mergington.edu", "mia@mergington.edu"]
-    },
-    "Art Club": {
-        "description": "Explore your creativity through painting and drawing",
-        "schedule": "Thursdays, 3:30 PM - 5:00 PM",
-        "max_participants": 15,
-        "participants": ["amelia@mergington.edu", "harper@mergington.edu"]
-    },
-    "Drama Club": {
-        "description": "Act, direct, and produce plays and performances",
-        "schedule": "Mondays and Wednesdays, 4:00 PM - 5:30 PM",
-        "max_participants": 20,
-        "participants": ["ella@mergington.edu", "scarlett@mergington.edu"]
-    },
-    "Math Club": {
-        "description": "Solve challenging problems and participate in math competitions",
-        "schedule": "Tuesdays, 3:30 PM - 4:30 PM",
-        "max_participants": 10,
-        "participants": ["james@mergington.edu", "benjamin@mergington.edu"]
-    },
-    "Debate Team": {
-        "description": "Develop public speaking and argumentation skills",
-        "schedule": "Fridays, 4:00 PM - 5:30 PM",
-        "max_participants": 12,
-        "participants": ["charlotte@mergington.edu", "henry@mergington.edu"]
-    }
-}
+# token -> username. Sessions reset when the server restarts.
+sessions: dict[str, str] = {}
+
+
+def load_activities() -> dict:
+    """Load the activity list teachers can edit without touching Python."""
+    with ACTIVITIES_PATH.open(encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict) or not data:
+        raise RuntimeError("activities.json must be a non-empty object")
+    for name, details in data.items():
+        if not isinstance(details, dict):
+            raise RuntimeError(f"{name} must be an object")
+        missing = [field for field in REQUIRED_ACTIVITY_FIELDS if field not in details]
+        if missing:
+            raise RuntimeError(f"{name} is missing {', '.join(missing)}")
+        if not isinstance(details["participants"], list):
+            raise RuntimeError(f"{name} participants must be a list")
+    return data
+
+
+def load_teachers() -> dict[str, str]:
+    """Load assigned teacher usernames and passwords."""
+    with TEACHERS_PATH.open(encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("teachers.json must be a non-empty list")
+    teachers = {}
+    for entry in data:
+        username = str(entry.get("username", "")).strip()
+        password = str(entry.get("password", ""))
+        if not username or not password:
+            raise RuntimeError("Each teacher needs a username and password")
+        teachers[username] = password
+    return teachers
+
+
+activities = load_activities()
+teachers = load_teachers()
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 @app.get("/")
@@ -141,6 +142,23 @@ def delete_activity_images(activity_name: str) -> None:
             os.remove(path)
 
 
+def require_teacher(authorization: str | None = Header(default=None)) -> str:
+    """Only a logged-in teacher may change registrations or images."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    token = authorization.split(" ", 1)[1].strip()
+    username = sessions.get(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    return username
+
+
+def get_activity(activity_name: str) -> dict:
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    return activities[activity_name]
+
+
 @app.get("/activities")
 def get_activities():
     result = {}
@@ -151,55 +169,80 @@ def get_activities():
     return result
 
 
+@app.post("/login")
+def login(body: LoginRequest):
+    """Check an assigned teacher username and password."""
+    username = body.username.strip()
+    expected = teachers.get(username)
+    if expected is None or not hmac.compare_digest(expected, body.password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    for token, name in list(sessions.items()):
+        if name == username:
+            del sessions[token]
+    token = secrets.token_urlsafe(32)
+    sessions[token] = username
+    return {"token": token, "username": username}
+
+
+@app.post("/logout")
+def logout(teacher: str = Depends(require_teacher), authorization: str | None = Header(default=None)):
+    if authorization and authorization.lower().startswith("bearer "):
+        sessions.pop(authorization.split(" ", 1)[1].strip(), None)
+    return {"message": f"Logged out {teacher}"}
+
+
+@app.get("/me")
+def current_teacher(authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return {"logged_in": False, "username": None}
+    username = sessions.get(authorization.split(" ", 1)[1].strip())
+    if not username:
+        return {"logged_in": False, "username": None}
+    return {"logged_in": True, "username": username}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+def signup_for_activity(activity_name: str, email: str, teacher: str = Depends(require_teacher)):
+    """Sign up a student for an activity. Teachers only."""
+    activity = get_activity(activity_name)
+    email = email.strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid student email is required")
 
-    # Get the specific activity
-    activity = activities[activity_name]
-
-    # Validate student is not already signed up
     if email in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is already signed up"
-        )
+        raise HTTPException(status_code=400, detail="Student is already signed up")
 
-    # Add student
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(status_code=400, detail="Activity is full")
+
     activity["participants"].append(email)
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+def unregister_from_activity(activity_name: str, email: str, teacher: str = Depends(require_teacher)):
+    """Unregister a student from an activity. Teachers only."""
+    activity = get_activity(activity_name)
 
-    # Get the specific activity
-    activity = activities[activity_name]
-
-    # Validate student is signed up
     if email not in activity["participants"]:
         raise HTTPException(
             status_code=400,
             detail="Student is not signed up for this activity"
         )
 
-    # Remove student
     activity["participants"].remove(email)
     return {"message": f"Unregistered {email} from {activity_name}"}
 
 
 @app.post("/activities/{activity_name}/image")
-async def upload_activity_image(activity_name: str, file: UploadFile = File(...)):
-    """Upload or replace the image for an activity."""
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+async def upload_activity_image(
+    activity_name: str,
+    file: UploadFile = File(...),
+    teacher: str = Depends(require_teacher),
+):
+    """Upload or replace the image for an activity. Teachers only."""
+    get_activity(activity_name)
 
     data = await file.read(MAX_IMAGE_BYTES + 1)
     await file.close()
@@ -227,10 +270,9 @@ async def upload_activity_image(activity_name: str, file: UploadFile = File(...)
 
 
 @app.delete("/activities/{activity_name}/image")
-def delete_activity_image(activity_name: str):
-    """Remove the image for an activity."""
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+def delete_activity_image(activity_name: str, teacher: str = Depends(require_teacher)):
+    """Remove the image for an activity. Teachers only."""
+    get_activity(activity_name)
     if image_url_for(activity_name) is None:
         raise HTTPException(status_code=404, detail="Activity image not found")
 
