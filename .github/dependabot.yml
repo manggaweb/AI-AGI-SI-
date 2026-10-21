@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: daily
+    # Routine version bumps stay closed. Security updates are not limited by
+    # this setting, so only vulnerable libraries open upgrade pull requests.
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+    groups:
+      vulnerable-python:
+        applies-to: security-updates
+        patterns:
+          - "*"
