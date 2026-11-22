@@ -8,25 +8,53 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["locales/en.json"]
+    paths:
+      - "locales/en.json"
   pull_request:
-    paths: ["locales/en.json"]
+    paths:
+      - ".github/workflows/translate.yml"
+      - "locales/en.json"
+      - "requirements.txt"
+      - "scripts/translate.py"
+      - "tests/test_translate.py"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: translate-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  translate:
+  validate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install requests
+        run: python -m pip install -r requirements.txt
+      - name: Test translation script
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+  translate:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test translation script
+        run: python -m unittest discover -s tests -p "test_*.py"
       - name: Translate
         env:
           DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
@@ -34,10 +62,15 @@ jobs:
           TARGET_LANGS: zh-CN,ja,fr,de
         run: python scripts/translate.py
       - name: Commit translations
-        # Fork PRs have no write token or secrets, so only commit for same-repo events
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add locales
-          git diff --cached --quiet || (git commit -m "chore: update translations" && git push)
+          if git diff --cached --quiet; then
+            echo "Translations are already up to date."
+            exit 0
+          fi
+          git commit -m "chore: update translations"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main

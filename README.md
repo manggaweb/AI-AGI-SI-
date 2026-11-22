@@ -18,8 +18,9 @@ Dependencies are installed automatically by the workflow.
 **One-time setup:** add a repository secret named `DEEPL_API_KEY`
 (Settings → Secrets and variables → Actions → New repository secret).
 
-**Usage:** edit `locales/en.json`, then push to `main`, open a PR, or run the "Translate" workflow manually
-(Actions tab → Translate → Run workflow). Translated files are committed back automatically.
+**Usage:** edit `locales/en.json`, then push to `main`, or run the "Translate" workflow manually
+on `main` (Actions tab → Translate → Run workflow). Translated files are committed back automatically.
+Pull requests only run offline validation; they never receive the DeepL secret or a write token.
 
 ---
 
